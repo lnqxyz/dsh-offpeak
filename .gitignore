@@ -1,0 +1,21 @@
+# 依赖与产物不入库（node_modules/cordis.js 是集成测试用的宿主实现导出件，
+# 不是 npm 公开包，取法见 README「测试」一节）
+node_modules/
+dist/
+*.tgz
+
+# 一次性产物：截图、草稿、自检临时文件
+临时/
+
+# 本地开发记录与作废设计稿（未随本仓库整理，留在本机）
+实现说明.md
+设计稿-v1.md
+设计稿-v2.md
+
+# 旧版自检截图（拍的是 0.1.16 的界面，那时还有状态文字；留着会误导读者）
+tools/visual-check/*.png
+
+# 编辑器 / 系统
+.DS_Store
+*.log
+.npmtmp/

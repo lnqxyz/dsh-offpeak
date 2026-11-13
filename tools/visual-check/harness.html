@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-offpeak 开关视觉自检</title>
+<!-- 离线真渲染自检：真 React 18 UMD + 桩 __ModuleLoader__/fetch/slots.register。
+     本文件不随 npm 包发布；跑法见 README「客户端那一半」一节——
+     在本仓库根目录用 headless Chrome 打开本页截图，再用图像工具回看。 -->
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f5f5f7;
+    --panel: #ffffff;
+    --ink: #1b1b1f;
+    --line: #d8d8de;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .note { font-size: 12px; opacity: .6; margin: 0 0 20px; }
+  .grid { display: flex; flex-direction: column; gap: 18px; }
+  .case { display: flex; flex-direction: column; gap: 6px; }
+  .case-title { font-size: 12px; opacity: .55; color: var(--ink); }
+  /* 模拟输入框下方的 composer dock：底色、内边距、圆角都照宿主气质来 */
+  .dock {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 8px 10px;
+  }
+  .composer-hint {
+    font-size: 12px;
+    opacity: .35;
+    padding: 4px 10px 8px;
+    border-top: 1px dashed transparent;
+  }
+  .row320 { width: 320px; }
+  .row520 { width: 520px; }
+  .row760 { width: 760px; }
+  .dark {
+    background: #1b1b1f;
+    --bg: #141417;
+    --panel: #232329;
+    --ink: #eaeaef;
+    --line: #3a3a44;
+    color: #eaeaef;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="./vendor/react.production.min.js"></script>
+<script src="./vendor/react-dom.production.min.js"></script>
+<script>
+  // 假 __ModuleLoader__：抓 spec，再用真 React 提供 require('react')
+  window.__ModuleLoader__ = {
+    load(spec) { window.__offpeakSpec = spec; },
+  };
+  window.__React = React;
+</script>
+<!-- 直接加载项目里真正要发出去的那份客户端代码，不做拷贝，免得自检的是旧快照 -->
+<script src="../../lib/client.js"></script>
+<script>
+  const h = React.createElement;
+  const spec = window.__offpeakSpec;
+  const mod = spec.factory((name) => {
+    if (name === 'react') return React;
+    throw new Error('unexpected require ' + name);
+  });
+
+  // 抓注册进来的组件
+  let Component = null;
+  mod.apply({
+    slots: {
+      inject(slot, register) { register(); return () => {}; },
+      register(entry, component) { Component = component; },
+    },
+  });
+
+  // 每个用例一个假状态，fetch 按当前 sessionId 查表返回
+  const STATES = {
+    'off-peak': {
+      enabled: true, sessionEnabled: true, inheritedOff: false, dryRun: false,
+      peak: false, waiting: false, bypassing: false,
+      releaseAt: null, releaseLabel: null, judge: 'agent-loop', version: '0.1.19',
+    },
+    'peak': {
+      enabled: true, sessionEnabled: true, inheritedOff: false, dryRun: false,
+      peak: true, waiting: false, bypassing: false,
+      releaseAt: 1794462060000, releaseLabel: '12:01', judge: 'agent-loop', version: '0.1.19',
+    },
+    'waiting': {
+      enabled: true, sessionEnabled: true, inheritedOff: false, dryRun: false,
+      peak: true, waiting: true, bypassing: false,
+      releaseAt: 1794462060000, releaseLabel: '12:01', judge: 'agent-loop', version: '0.1.19',
+    },
+    'tomorrow': {
+      enabled: true, sessionEnabled: true, inheritedOff: false, dryRun: false,
+      peak: true, waiting: true, bypassing: false,
+      releaseAt: 1794510060000, releaseLabel: '明天 01:01', judge: 'agent-loop', version: '0.1.19',
+    },
+    'off': {
+      enabled: true, sessionEnabled: false, inheritedOff: false, dryRun: false,
+      peak: true, waiting: false, bypassing: false,
+      releaseAt: 1794462060000, releaseLabel: '12:01', judge: 'agent-loop', version: '0.1.19',
+    },
+    'inherited': {
+      enabled: true, sessionEnabled: false, inheritedOff: true, dryRun: false,
+      peak: false, waiting: false, bypassing: false,
+      releaseAt: null, releaseLabel: null, judge: 'agent-loop', version: '0.1.19',
+    },
+    'global-off': {
+      enabled: false, sessionEnabled: true, inheritedOff: false, dryRun: false,
+      peak: false, waiting: false, bypassing: false,
+      releaseAt: null, releaseLabel: null, judge: 'agent-loop', version: '0.1.19',
+    },
+    'dry-run': {
+      enabled: true, sessionEnabled: true, inheritedOff: false, dryRun: true,
+      peak: true, waiting: false, bypassing: false,
+      releaseAt: 1794462060000, releaseLabel: '12:01', judge: 'agent-loop', version: '0.1.19',
+    },
+  };
+
+  window.fetch = async (url) => {
+    const id = new URL(url, 'http://x/').searchParams.get('sessionId') || '';
+    const state = STATES[id] || STATES['off-peak'];
+    return {
+      ok: true,
+      json: async () => state,
+    };
+  };
+
+  const CASES = [
+    ['低谷（默认开，蓝）', 'off-peak', 'row760'],
+    ['高峰（不再有文案）', 'peak', 'row760'],
+    ['已排队 + 立即运行按钮', 'waiting', 'row760'],
+    ['跨天放行时刻（不再显示几点）', 'tomorrow', 'row760'],
+    ['本会话已关（黑）', 'off', 'row760'],
+    ['跟随主会话已关（置灰不可点）', 'inherited', 'row760'],
+    ['总开关关（只展示状态）', 'global-off', 'row760'],
+    ['演练中（只记日志，开关不可点）', 'dry-run', 'row760'],
+    ['窄窗口 320px：开关与按钮', 'waiting', 'row320'],
+    ['中等 520px', 'waiting', 'row520'],
+  ];
+
+  function render() {
+    const nodes = CASES.map(([title, id, cls]) =>
+      h('div', { className: 'case', key: id + cls },
+        h('div', { className: 'case-title' }, title + '  ·  ' + id),
+        h('div', { className: 'dock ' + cls },
+          h(Component, { sessionId: id }),
+          h('div', { className: 'composer-hint' }, '（此处是输入框，开关在它上方的 dock 行）'),
+        ),
+      ),
+    );
+    // 深色一组：开态蓝、关态黑各一格。关态黑在深色背景上还能看见轮廓，
+    // 全靠轨道那圈 1px rgba(120,120,128,0.4) 描边 —— 这一格就是给这个坑留的证据。
+    const dark = h('div', { className: 'case dark', key: 'dark' },
+      h('div', { className: 'case-title' }, '深色主题：开态蓝 / 关态黑（1px 描边保住黑轨道轮廓）'),
+      h('div', { className: 'dock row760' }, h(Component, { sessionId: 'waiting' })),
+      h('div', { className: 'dock row760', style: { marginTop: '10px' } }, h(Component, { sessionId: 'off' })),
+    );
+    ReactDOM.createRoot(document.getElementById('root')).render(
+      h('div', null,
+        h('h1', null, 'dsh-offpeak 开关：十种状态 + 深色主题的真渲染（0.1.19 iOS 观感）'),
+        h('p', { className: 'note' }, 'React 18 真渲染（vendored production UMD）+ 假 fetch，尺寸/换行/层级按宿主 composer dock 气质模拟。'),
+        h('div', { className: 'grid' }, nodes, dark),
+      ),
+    );
+  }
+
+  // 等所有组件的首轮轮询落地再截图
+  Promise.all(Object.keys(STATES).map(() => Promise.resolve())).then(() => {
+    render();
+    setTimeout(() => { document.title = 'ready'; }, 800);
+    // #measure：把每格的实际布局与开关样式量成 JSON 打进 DOM，供 --dump-dom 读取。
+    // 截图只能靠眼睛，#measure 是它的机器可读版：尺寸、颜色、描边、过渡、可见文字、是否溢出。
+    if (location.hash === '#measure') {
+      setTimeout(() => {
+        const report = [];
+        const rect = (n) => {
+          const b = n.getBoundingClientRect();
+          return {
+            left: +b.left.toFixed(1), right: +b.right.toFixed(1), top: +b.top.toFixed(1),
+            width: +b.width.toFixed(1), height: +b.height.toFixed(1),
+          };
+        };
+        for (const el of document.querySelectorAll('.case')) {
+          const title = (el.querySelector('.case-title')?.textContent || '').split('  ·  ')[0];
+          const docks = [...el.querySelectorAll('.dock')];
+          docks.forEach((dock, i) => {
+            const root = dock.firstElementChild;
+            const sw = root?.querySelector('[role="switch"]');
+            const run = [...(root?.querySelectorAll('button') || [])]
+              .find((b) => b !== sw && b.textContent.trim() === '立即运行');
+            const dr = dock.getBoundingClientRect();
+            const inside = (n) => {
+              const b = n.getBoundingClientRect();
+              return b.left >= dr.left - 0.5 && b.right <= dr.right + 0.5;
+            };
+            const track = sw?.firstElementChild || null;
+            const knob = track?.firstElementChild || null;
+            const tcs = track ? getComputedStyle(track) : null;
+            const kcs = knob ? getComputedStyle(knob) : null;
+            report.push({
+              title: docks.length > 1 ? title + ' #' + (i + 1) : title,
+              text: root ? root.textContent.trim() : null,
+              switchLabel: sw ? (sw.getAttribute('aria-label') || '') : null,
+              ariaChecked: sw ? sw.getAttribute('aria-checked') : null,
+              disabled: sw ? sw.disabled : null,
+              switchOpacity: sw ? getComputedStyle(sw).opacity : null,
+              switchRect: sw ? rect(sw) : null,
+              switchInside: sw ? inside(sw) : null,
+              rowRect: root ? rect(root) : null,
+              rowInside: root ? inside(root) : null,
+              trackRect: track ? rect(track) : null,
+              trackRadius: tcs ? tcs.borderRadius : null,
+              trackBackground: tcs ? tcs.backgroundColor : null,
+              trackBoxShadow: tcs ? tcs.boxShadow : null,
+              trackTransition: tcs ? tcs.transitionProperty + ' ' + tcs.transitionDuration : null,
+              knobRect: knob ? rect(knob) : null,
+              knobBackground: kcs ? kcs.backgroundColor : null,
+              knobRadius: kcs ? kcs.borderRadius : null,
+              knobBoxShadow: kcs ? kcs.boxShadow : null,
+              knobTransition: kcs ? kcs.transitionProperty + ' ' + kcs.transitionDuration : null,
+              runRect: run ? rect(run) : null,
+              runInside: run ? inside(run) : null,
+              order: sw && run && (sw.compareDocumentPosition(run) & Node.DOCUMENT_POSITION_FOLLOWING) ? 'switch-before-run' : (run ? 'run-before-switch' : 'no-run'),
+              gap: sw && run ? +(run.getBoundingClientRect().left - sw.getBoundingClientRect().right).toFixed(1) : null,
+              dockWidth: +dr.width.toFixed(1),
+            });
+          });
+        }
+        document.body.textContent = '';
+        const pre = document.createElement('pre');
+        pre.id = 'measure';
+        pre.textContent = JSON.stringify(report, null, 2);
+        document.body.appendChild(pre);
+      }, 1400);
+    }
+  });
+</script>
+</body>
+</html>

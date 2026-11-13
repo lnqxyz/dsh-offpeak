@@ -1,0 +1,28 @@
+# 本插件默认挂进 profile。配置改这里，或在你自己的 profile patch 里覆盖同 id 的 config。
+- insert:
+    - id: dsh-offpeak
+      name: 'dsh-offpeak'
+      config:
+        enabled: true
+        # 只记日志不拦截。第一次装上时建议先设 true，看一轮日志确认规则没写错。
+        dryRun: false
+        timeZone: Asia/Shanghai
+        # 高峰 = 周一至周五 09:00-12:00、14:00-18:00（左闭右开）。
+        # 想改成别的时段就改这里；给空数组 [] 等于「没有高峰」，插件完全不拦。
+        peakWindows:
+          - days: [1, 2, 3, 4, 5]
+            start: '09:00'
+            end: '12:00'
+          - days: [1, 2, 3, 4, 5]
+            start: '14:00'
+            end: '18:00'
+        # 高峰结束后再等这么多秒（区间内随机），避免整点一起涌出去。
+        releaseJitterSeconds: [60, 120]
+        # 注册 /peak（看状态）与 /peak now（立即放行本会话）。
+        manualReleaseCommand: true
+        # 重启后自动推一把上次没跑完的排队消息（只认 resume，不动新建会话）。
+        resumePending: true
+        # 重启后自动接着跑上次被打断的那一轮。判据是日志尾部 turn/end 的
+        # 「被系统打断」态（进程退出 = aborted/disposed，硬杀后补平 = interrupted）；
+        # 用户自己点停止、报错、超长、被拦一律不续跑。
+        resumeInterruptedTurn: true
