@@ -557,3 +557,345 @@ test('Config schema 的 validate 走同一套归一', () => {
   assert.equal(result.value.enabled, false);
   assert.deepEqual(result.value.jitter, [5, 10]);
 });
+
+// ---------------------------------------------------------------------------
+// 醒来时还在高峰就续排（0.1.20，P0-2）
+// ---------------------------------------------------------------------------
+
+/** 周五 10:00 —— 「提交时在高峰」。 */
+const FRI_10 = sh(2026, 11, 13, 10, 0);
+/** 周五 12:00 —— 按当时的钟算出来的放行时刻。 */
+const FRI_12 = sh(2026, 11, 13, 12, 0);
+
+/**
+ * 假时钟 + 假 timer：每次 `setTimeout` 直接把「现在」拨到 `wakeAts` 里的下一个时刻，
+ * 再在微任务里回调。
+ *
+ * 这正是「等完之后才发现钟不对」的机器：真实场景是笔记本合盖休眠、系统时间被改，
+ * 定时器到点时人已经不在原来那个时刻上了。
+ */
+function makeSkippingClock(start, wakeAts) {
+  let now = start;
+  const queue = [...wakeAts];
+  const fired = [];
+  return {
+    now: () => now,
+    fired,
+    timers: {
+      setTimeout: (fn, delay) => {
+        fired.push(delay);
+        const next = queue.shift();
+        // 队列空了就按正常时钟前进：让等待能收敛，测试不会吊死。
+        now = next === undefined ? new Date(now.getTime() + delay) : next;
+        queueMicrotask(fn);
+        return fired.length;
+      },
+      clearTimeout: () => {},
+    },
+  };
+}
+
+/**
+ * 假时钟 + 假 timer：等待正常走到 `plan`，**刚放行的那一刻**把钟往回拨到 `rewindTo`。
+ *
+ * 这对应「系统时间被改」：等待结束的瞬间钟还是对的，紧接着被拨回去。
+ * 续排逻辑于是会算出「下一次放行时刻不晚于上一次」，必须认输放行而不是原地打转。
+ */
+function makeRewindingClock(start, plan, rewindTo) {
+  let now = start;
+  let finished = false;
+  const fired = [];
+  return {
+    fired,
+    now: () => {
+      if (finished) return rewindTo;
+      const snapshot = now;
+      if (snapshot.getTime() >= plan.getTime()) finished = true;
+      return snapshot;
+    },
+    timers: {
+      setTimeout: (fn, delay) => {
+        fired.push(delay);
+        now = new Date(now.getTime() + delay);
+        queueMicrotask(fn);
+        return fired.length;
+      },
+      clearTimeout: () => {},
+    },
+  };
+}
+
+/**
+ * 假时钟 + **永不触发**的 timer：把等待冻在原地。
+ *
+ * 用来观察「等待登记」与「手动放行」这类只在等待期间成立的状态。
+ * 自动推进的时钟会让等待瞬间走完，`releaseNow` 就再也叫不到人了。
+ */
+function makeFrozenClock(start) {
+  const fired = [];
+  return {
+    now: () => start,
+    fired,
+    timers: {
+      setTimeout: (_fn, delay) => {
+        fired.push(delay);
+        return fired.length;
+      },
+      clearTimeout: () => {},
+    },
+  };
+}
+
+test('醒来仍在高峰：续排到下一个低谷，而不是按原价直接发出去', async () => {
+  // 只算一次放行时刻的老实现：周五 10:00 排到 12:00，醒来是周一 10:00（还在高峰），
+  // 于是「等了个寂寞」还按原价把请求发了出去。正确行为是看到钟不对再排一轮。
+  const clock = makeSkippingClock(FRI_10, [sh(2026, 11, 16, 10, 0), sh(2026, 11, 16, 12, 0)]);
+  const logs = [];
+  const { gate } = makeGate(
+    { releaseJitterSeconds: [0, 0] },
+    {
+      now: clock.now,
+      timers: clock.timers,
+      logger: { info: (m) => logs.push(m), warn: (m) => logs.push(`warn:${m}`) },
+    },
+  );
+
+  let called = 0;
+  const options = { sessionId: 's-root', provider: HELD_PROVIDER, model: HELD_MODEL, signal: new AbortController().signal };
+  const next = () => {
+    called += 1;
+    return (async function* () { yield { type: 'chunk' }; })();
+  };
+
+  const iterable = gate.listener(options, next);
+  const chunks = await Promise.race([
+    drain(iterable),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error('醒来后没有续排，也没有收敛')),
+      2000,
+    )),
+  ]);
+
+  assert.deepEqual(chunks, [{ type: 'chunk' }]);
+  assert.equal(called, 1, '整条链路只该发一次请求');
+  assert.ok(
+    logs.some((m) => /醒来仍在高峰，续排到/u.test(m)),
+    `要留下能看懂的续排日志，实际：${logs.join(' | ')}`,
+  );
+  assert.ok(logs.some((m) => /放行（计划/u.test(m)), '放行日志仍然要有');
+  assert.equal(gate.status('s-root').waiting, false, '放行后不该留下等待登记');
+  assert.ok(clock.fired.length >= 2, '第二次等待真的发生过');
+});
+
+test('续排时刻没有前进时直接放行，不死循环', async () => {
+  // 系统时间被往回拨、或窗口配置绕成环：重算出来的放行时刻不晚于上一次。
+  // 此时必须认输放行并告警 —— 卡在这里等于把用户的会话挂死。
+  const clock = makeRewindingClock(FRI_10, FRI_12, FRI_10);
+  const logs = [];
+  const { gate } = makeGate(
+    { releaseJitterSeconds: [0, 0] },
+    { now: clock.now, timers: clock.timers, logger: { info: (m) => logs.push(m), warn: (m) => logs.push(`warn:${m}`) } },
+  );
+  let called = 0;
+  const next = () => {
+    called += 1;
+    return (async function* () { yield { type: 'chunk' }; })();
+  };
+  const options = { sessionId: 's-root', provider: HELD_PROVIDER, model: HELD_MODEL, signal: new AbortController().signal };
+
+  const chunks = await Promise.race([
+    drain(gate.listener(options, next)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('续排没有进展却不退出，疑似死循环')), 2000)),
+  ]);
+  assert.deepEqual(chunks, [{ type: 'chunk' }]);
+  assert.equal(called, 1);
+  assert.ok(
+    logs.some((m) => /没有晚于上一次/u.test(m)),
+    `应告警说明为什么放行，实际：${logs.join(' | ')}`,
+  );
+});
+
+test('醒来仍高峰最多续排 8 次，之后先放行这一轮', async () => {
+  // 合盖休眠一个月也能每次都醒在高峰里。必须有个上限，否则会话永远等不到头。
+  // 用「每天 00:00-23:59 全时段高峰」的窗口，保证每一次醒来都还在高峰。
+  const allDay = [{ days: [1, 2, 3, 4, 5, 6, 7], start: '00:00', end: '23:59' }];
+  const wakes = [];
+  for (let index = 1; index <= 9; index += 1) {
+    wakes.push(sh(2026, 11, 16 + index, 10, 0)); // 连续几个工作日的上午
+  }
+  const clock = makeSkippingClock(FRI_10, wakes);
+  const logs = [];
+  const { gate } = makeGate(
+    { peakWindows: allDay, releaseJitterSeconds: [0, 0] },
+    { now: clock.now, timers: clock.timers, logger: { info: (m) => logs.push(m), warn: (m) => logs.push(`warn:${m}`) } },
+  );
+  let called = 0;
+  const next = () => {
+    called += 1;
+    return (async function* () { yield { type: 'chunk' }; })();
+  };
+  const options = { sessionId: 's-root', provider: HELD_PROVIDER, model: HELD_MODEL, signal: new AbortController().signal };
+
+  const chunks = await Promise.race([
+    drain(gate.listener(options, next)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('续排次数没有上限')), 2000)),
+  ]);
+  assert.deepEqual(chunks, [{ type: 'chunk' }]);
+  assert.equal(called, 1);
+  assert.equal(
+    logs.filter((m) => /续排到/u.test(m)).length,
+    8,
+    '续排 8 次后应停手（第 9 次只告警放行）',
+  );
+  assert.ok(logs.some((m) => /已续排 8 次/u.test(m)), `应说明为什么不再等，实际：${logs.join(' | ')}`);
+});
+
+test('手动放行仍然立刻结束等待，不会被续排逻辑拖住', async () => {
+  // 用户点了「立即运行」的意思是「这一轮别等了」，续排不能把它又挂回去。
+  const clock = makeFrozenClock(FRI_10);
+  const logs = [];
+  const { gate } = makeGate(
+    { releaseJitterSeconds: [0, 0] },
+    { now: clock.now, timers: clock.timers, logger: { info: (m) => logs.push(m), warn: (m) => logs.push(`warn:${m}`) } },
+  );
+  let called = 0;
+  const next = () => {
+    called += 1;
+    return (async function* () { yield { type: 'chunk' }; })();
+  };
+  const options = { sessionId: 's-root', provider: HELD_PROVIDER, model: HELD_MODEL, signal: new AbortController().signal };
+
+  const iterable = gate.listener(options, next);
+  const pending = drain(iterable);
+  // 生成器体在第一次 next() 时同步跑到第一个 await 之前，登记应当已经在了；
+  // 再让出几轮，确保订阅也挂上，否则 releaseNow 会叫不到人。
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(gate.status('s-root').waiting, true, '开始等待后应留下登记');
+
+  assert.ok(gate.releaseNow('s-root') >= 1, '应叫醒正在等的那一个');
+  assert.deepEqual(await pending, [{ type: 'chunk' }]);
+  assert.equal(called, 1);
+  assert.equal(logs.some((m) => /续排到/u.test(m)), false, '手动放行不该再续排');
+});
+
+// ---------------------------------------------------------------------------
+// 坏窗口项：不崩、被过滤、告警一次（0.1.20，P0-1 / P1-1）
+// ---------------------------------------------------------------------------
+
+test('normalizeConfig：peakWindows 里的非对象项被丢掉，数组仍是数组', () => {
+  const config = normalizeConfig({
+    peakWindows: [null, undefined, 42, 'oops', { days: [3], start: '09:00', end: '12:00' }],
+  });
+  assert.deepEqual(config.peakWindows, [{ days: [3], start: '09:00', end: '12:00' }]);
+  // 空数组仍然是有意义的配置：等于「没有高峰」，不能被当成坏值抹成 null。
+  assert.deepEqual(normalizeConfig({ peakWindows: [] }).peakWindows, []);
+  assert.equal(normalizeConfig({}).peakWindows, null, '缺省必须交给内置窗口');
+});
+
+test('peakWindows 全是坏项时退化成空表（没有高峰），并告警说明丢了几项', () => {
+  const warns = [];
+  const config = normalizeConfig(
+    { peakWindows: [null, 42] },
+    { warn: (message) => warns.push(message) },
+  );
+  assert.deepEqual(config.peakWindows, [], '全坏 = 没有可用窗口，不是「用默认窗口」');
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /2 项/u);
+  assert.match(warns[0], /null/u, '告警要带原始值，否则用户不知道改了哪一项');
+});
+
+test('同一处坏窗口只告警一次：归一化每个请求都跑，不能刷屏', () => {
+  const warns = [];
+  const logger = { warn: (message) => warns.push(message) };
+  for (let round = 0; round < 5; round += 1) {
+    normalizeConfig({ peakWindows: [null] }, logger);
+  }
+  assert.equal(warns.length, 1, '同一个 logger 下同一处坏值只报一次');
+  // 换一个 logger（= 换一个观察者）仍应拿到完整告警
+  const other = [];
+  normalizeConfig({ peakWindows: [null] }, { warn: (message) => other.push(message) });
+  assert.equal(other.length, 1);
+});
+
+test('时段写错（start / end / days）逐项告警并丢弃，不再静默变成永不拦截', () => {
+  // P1-1：一个字符写错就让插件悄悄失去作用，而 /peak 还反过来报「现在是低谷」。
+  // 断言用具体的「坏在哪」措辞，不用裸的 start/end/days —— 告警里带着原始值，
+  // 那串 JSON 本身就有这几个键名，裸匹配会让「说错了原因」也照样绿。
+  const cases = [
+    { window: { days: [3], start: '9点', end: '12:00' }, expect: /start 无法解析/u },
+    { window: { days: [3], start: '09:00', end: '25:00' }, expect: /end 无法解析/u },
+    { window: { days: '1-5', start: '09:00', end: '12:00' }, expect: /days 必须是/u },
+    { window: { days: [0, 3], start: '09:00', end: '12:00' }, expect: /不是 1-7 的整数/u },
+    { window: { days: [3.5], start: '09:00', end: '12:00' }, expect: /不是 1-7 的整数/u },
+    { window: { days: [], start: '09:00', end: '12:00' }, expect: /days 为空数组/u },
+    { window: { start: '09:00', end: '12:00' }, expect: /days 必须是/u },
+    { window: 'oops', expect: /不是对象/u },
+  ];
+  for (const item of cases) {
+    const warns = [];
+    const config = normalizeConfig({ peakWindows: [item.window] }, { warn: (m) => warns.push(m) });
+    assert.deepEqual(config.peakWindows, [], `${JSON.stringify(item.window)} 应被丢弃`);
+    assert.equal(warns.length, 1, `${JSON.stringify(item.window)} 应告警一次`);
+    assert.match(warns[0], item.expect, `${JSON.stringify(item.window)} 的告警没说清坏在哪：${warns[0]}`);
+  }
+});
+
+test('坏窗口不会被当成「没有高峰」而放行：合法那项照常拦住', async () => {
+  const warns = [];
+  const clock = makeFrozenClock(PEAK_NOW);
+  // 直接建 gate，不经过 makeGate：makeGate 会先归一化一次，
+  // 坏项在带 logger 的路径跑到之前就已经被丢掉，告警就观察不到了。
+  const gate = createGate(
+    () => ({
+      // 周三 09:00-12:00 是高峰；前一后两个坏项必须被丢掉且不影响这一项。
+      peakWindows: [null, { days: [3], start: '09:00', end: '12:00' }, { days: '3', start: '09:00', end: '12:00' }],
+      releaseJitterSeconds: [0, 0],
+    }),
+    {
+      getSession: () => plainSession,
+      isAgentLoopRequest: () => true,
+      now: clock.now,
+      timers: clock.timers,
+      logger: { info: () => {}, warn: (m) => warns.push(m) },
+    },
+  );
+  const options = { sessionId: 's-root', provider: HELD_PROVIDER, model: HELD_MODEL, signal: new AbortController().signal };
+  const out = gate.listener(options, () => (async function* () { yield { type: 'chunk' }; })());
+  assert.equal(typeof out[Symbol.asyncIterator], 'function', '合法窗口仍应扣住这次调用');
+  const pending = drain(out);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(gate.status('s-root').waiting, true, '合法那项必须仍然拦住这次调用');
+  assert.ok(warns.some((m) => /peakWindows/u.test(m)), '坏项要留一条告警');
+  gate.releaseNow('s-root');
+  assert.deepEqual(await pending, [{ type: 'chunk' }]);
+});
+
+test('peakWindows: [null] 时连非拦截范围的模型也能发出去（不再整机停摆）', async () => {
+  // 这是 P0-1 的原始症状：一次配置手滑让所有模型调用都抛 TypeError，
+  // 连 qwen 模型、连半夜低谷一起陪葬。
+  const { gate } = makeGate({ peakWindows: [null] }, { now: () => PEAK_NOW });
+  let called = 0;
+  const next = () => {
+    called += 1;
+    return (async function* () { yield { type: 'chunk' }; })();
+  };
+  const options = { sessionId: 's-root', provider: 'qwenwork', model: 'qwen3.8-max-preview', signal: new AbortController().signal };
+  const out = gate.listener(options, next);
+  assert.equal(typeof out.then, 'undefined');
+  assert.deepEqual(await drain(out), [{ type: 'chunk' }]);
+  assert.equal(called, 1);
+});
+
+test('peakWindows: [null] 时半夜低谷照样立刻放行', async () => {
+  const { gate } = makeGate({ peakWindows: [null] }, { now: () => sh(2026, 11, 11, 3, 0) });
+  let called = 0;
+  const next = () => {
+    called += 1;
+    return (async function* () { yield { type: 'chunk' }; })();
+  };
+  const options = { sessionId: 's-root', provider: HELD_PROVIDER, model: HELD_MODEL, signal: new AbortController().signal };
+  await drain(gate.listener(options, next));
+  assert.equal(called, 1);
+});

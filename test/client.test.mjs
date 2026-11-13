@@ -436,6 +436,254 @@ test('readStatus：2xx 返回对象，非 2xx / 抛错 / 非对象一律 null', 
   }
 });
 
+/* ------------------------------------------------------------------ *
+ * 点开关这条主交互（改动前完全没有覆盖：把 postToggle 改坏、
+ * 或让「演练中 / 总开关关」时还能点，原有的绿点一个都不会红）
+ * ------------------------------------------------------------------ */
+
+test('开关的 aria-checked 跟随 checked：开态 true，关态 false', async () => {
+  const cases = [
+    ['开', { ...BASE_STATUS }, 'true'],
+    ['关', { ...BASE_STATUS, sessionEnabled: false }, 'false'],
+    // 总开关关时 checked 也是 false —— 开关得如实说自己现在是关的。
+    ['总开关关', { ...BASE_STATUS, enabled: false }, 'false'],
+    // 主会话关掉、子代理继承到「关」：同样是 false。
+    ['跟随主会话关', { ...BASE_STATUS, inheritedOff: true, sessionEnabled: false }, 'false'],
+  ];
+
+  for (const [name, status, expected] of cases) {
+    await withHarness({ fetch: respondWith(status) }, async ({ rt }) => {
+      const button = findButton(rt.tree, '错峰发送');
+      assert.equal(button.props.role, 'switch');
+      assert.equal(button.props['aria-checked'], expected, name + '：aria-checked');
+    });
+  }
+});
+
+test('点开关发出 POST /dsh-offpeak/toggle：sessionId 与目标状态都在 query 里', async () => {
+  let toggleUrl = null;
+  let toggleInit = null;
+  const fetchImpl = async (url, init) => {
+    if (url.startsWith('/dsh-offpeak/toggle')) {
+      toggleUrl = url;
+      toggleInit = init;
+      // 真宿主会回完整状态；开 → 关。
+      return { ok: true, json: async () => ({ ...BASE_STATUS, sessionEnabled: false }) };
+    }
+    return { ok: true, json: async () => ({ ...BASE_STATUS }) };
+  };
+
+  await withHarness({ fetch: fetchImpl }, async ({ rt }) => {
+    const button = findButton(rt.tree, '错峰发送');
+    assert.equal(button.props['aria-checked'], 'true', '前置：现在是开态');
+
+    button.props.onClick();
+    await rt.flush();
+
+    assert.equal(toggleUrl, '/dsh-offpeak/toggle?sessionId=s-1&enabled=0', '开→关应发 enabled=0');
+    assert.equal(toggleInit.method, 'POST');
+    assert.equal(toggleInit.headers['x-dsh-offpeak'], '1');
+    assert.equal(toggleInit.cache, 'no-store');
+
+    const after = findButton(rt.tree, '错峰发送');
+    assert.equal(after.props['aria-checked'], 'false', '宿主回了关态，开关要跟着翻过去');
+  });
+});
+
+test('点开关时 POST 失败：状态回落成原来的开，且不冒出任何提示文字', async () => {
+  let toggles = 0;
+  const fetchImpl = async (url) => {
+    if (url.startsWith('/dsh-offpeak/toggle')) {
+      toggles += 1;
+      return { ok: false, json: async () => ({}) };
+    }
+    // 重读也还是开：宿主没接受这次切换。
+    return { ok: true, json: async () => ({ ...BASE_STATUS }) };
+  };
+
+  await withHarness({ fetch: fetchImpl }, async ({ rt, texts }) => {
+    const button = findButton(rt.tree, '错峰发送');
+    button.props.onClick();
+    await rt.flush();
+
+    assert.equal(toggles, 1, '应真的发了一次切换请求');
+    const after = findButton(rt.tree, '错峰发送');
+    assert.equal(after.props['aria-checked'], 'true', '失败后必须回落成原来的开态');
+    assert.equal(after.props.disabled, false, '失败后不能把开关锁死');
+    assert.deepEqual(texts(), ['错峰发送'], '开关失败的提示句只给「立即运行」，这里不许加文案');
+  });
+});
+
+test('POST 失败后要回读一次实况：别让开关停在半路（宿主其实已经改了）', async () => {
+  // 首轮读到的是「开」；此后实况变成「关」——宿主处理了这次切换、只是响应丢了。
+  // 少了那次回读，开关就会停在旧的开态上（这条用例原先构造不出差异，被变异测试抓到）。
+  let reads = 0;
+  const fetchImpl = async (url) => {
+    if (url.startsWith('/dsh-offpeak/toggle')) {
+      return { ok: false, json: async () => ({}) };
+    }
+    reads += 1;
+    const state = reads === 1 ? { ...BASE_STATUS } : { ...BASE_STATUS, sessionEnabled: false };
+    return { ok: true, json: async () => state };
+  };
+
+  await withHarness({ fetch: fetchImpl }, async ({ rt }) => {
+    assert.equal(findButton(rt.tree, '错峰发送').props['aria-checked'], 'true', '前置：首轮读到开');
+    findButton(rt.tree, '错峰发送').props.onClick();
+    await rt.flush();
+    assert.equal(reads, 2, '失败后应当再读一次状态');
+    assert.equal(
+      findButton(rt.tree, '错峰发送').props['aria-checked'],
+      'false',
+      '响应丢了也要跟实况走，不能停在旧的开态',
+    );
+  });
+});
+
+// P2-1：深色主题下「关」的黑轨道曾只剩一颗悬空白点（描边 1.19:1、禁用态 1.08:1）。
+// 修法是在轨道外面补一圈 1px 浅灰（开态不加），禁用态换更亮的一圈补偿 0.45 的压暗。
+// 断言钉住「哪几组有外圈」和「外圈的亮度」，免得被无声改回去。
+test('深色主题轮廓：关态与禁用态补一圈外描边，开态不加', async () => {
+  const INNER = 'inset 0 0 0 1px rgba(120,120,128,0.4)';
+  const cases = [
+    ['关 / 可点', { ...BASE_STATUS, sessionEnabled: false }, '0 0 0 1px rgba(210,210,218,0.5)'],
+    ['关 / 禁用', { ...BASE_STATUS, sessionEnabled: false, inheritedOff: true }, '0 0 0 1px rgba(255,255,255,0.92)'],
+    ['开 / 可点', { ...BASE_STATUS }, null],
+    ['开 / 禁用', { ...BASE_STATUS, dryRun: true }, '0 0 0 1px rgba(255,255,255,0.92)'],
+  ];
+
+  for (const [name, status, halo] of cases) {
+    // eslint-disable-next-line no-await-in-loop -- 每格要独立的渲染环境
+    await withHarness({ fetch: respondWith(status) }, async ({ rt }) => {
+      const shadow = findButton(rt.tree, '错峰发送').children[0].props.style.boxShadow;
+
+      // 内圈那道必须一直在（黑轨道内沿的层次）。
+      assert.ok(shadow.includes(INNER), name + '：内圈不能丢');
+
+      if (halo === null) {
+        assert.equal(shadow, INNER, name + '：蓝轨道够亮，不该多加光边');
+        return;
+      }
+      assert.equal(shadow, halo + ', ' + INNER, name + '：外圈 + 内圈，外圈不带 inset');
+    });
+  }
+});
+
+test('开关的 disabled：只有 busy、或禁止切换（演练中 / 总开关关 / 跟随主会话关）时为 true', async () => {
+  const locked = [
+    ['演练中', { ...BASE_STATUS, dryRun: true }],
+    ['总开关关', { ...BASE_STATUS, enabled: false }],
+    ['跟随主会话关', { ...BASE_STATUS, inheritedOff: true, sessionEnabled: false }],
+  ];
+
+  for (const [name, status] of locked) {
+    await withHarness({ fetch: respondWith(status) }, async ({ rt }) => {
+      const button = findButton(rt.tree, '错峰发送');
+      assert.equal(button.props.disabled, true, name + '：不该能点');
+      // 点了也不能发请求 —— 兜底看 onClick 自己的守卫。
+      const before = rt.tree;
+      button.props.onClick();
+      await rt.flush();
+      assert.equal(findButton(rt.tree, '错峰发送').props['aria-checked'],
+        findButton(before, '错峰发送').props['aria-checked'], name + '：被禁时点了也不能变');
+    });
+  }
+
+  // 正常可点。
+  await withHarness({ fetch: respondWith({ ...BASE_STATUS }) }, async ({ rt }) => {
+    assert.equal(findButton(rt.tree, '错峰发送').props.disabled, false, '可切换时不能禁');
+  });
+
+  // busy：请求在飞时按钮必须 disabled，避免连点发出两次切换。
+  const pending = new Promise(() => {});
+  const stuck = async (url) => {
+    if (url.startsWith('/dsh-offpeak/toggle')) return pending;
+    return { ok: true, json: async () => ({ ...BASE_STATUS }) };
+  };
+  await withHarness({ fetch: stuck }, async ({ rt }) => {
+    const button = findButton(rt.tree, '错峰发送');
+    assert.equal(button.props.disabled, false, '前置：空闲时可点');
+    button.props.onClick();
+    await rt.flush();
+    const busyNow = findButton(rt.tree, '错峰发送');
+    assert.equal(busyNow.props.disabled, true, '请求在飞时应 disabled');
+    assert.equal(busyNow.props.style.opacity, 0.45, '禁用态观感沿用整枚 0.45');
+  });
+});
+
+test('「立即运行」的失败句不会被下一轮成功轮询擦掉，只在再次点击时清', async () => {
+  let releaseFails = true;
+  let releases = 0;
+  const fetchImpl = async (url) => {
+    if (url.startsWith('/dsh-offpeak/release')) {
+      releases += 1;
+      return { ok: !releaseFails, json: async () => ({}) };
+    }
+    // 状态一直是「排队中」：轮询每轮都成功，正是把提示擦掉的那种场景。
+    return { ok: true, json: async () => ({ ...BASE_STATUS, waiting: true }) };
+  };
+
+  await withHarness({ fetch: fetchImpl }, async ({ rt, timers, texts }) => {
+    const button = findButton(rt.tree, '立即运行');
+    button.props.onClick();
+    await rt.flush();
+    assert.equal(releases, 1);
+    assert.ok(texts().includes('没能立即运行：宿主没有响应'), '点完失败要有提示');
+
+    // 关键回归：轮询成功若干轮后，提示仍在（以前这里会 setError(null) 秒清）。
+    for (let i = 0; i < 3; i++) {
+      timers[0]();
+      await rt.flush();
+    }
+    assert.ok(
+      texts().includes('没能立即运行：宿主没有响应'),
+      '5 秒轮询不该擦掉失败提示',
+    );
+
+    // 再次点击发起新请求时才清；这次成功，提示应当消失（桩仍回报排队中，
+    // 所以按钮还在，但错误句必须没有了）。
+    releaseFails = false;
+    const again = findButton(rt.tree, '立即运行');
+    again.props.onClick();
+    await rt.flush();
+    assert.equal(releases, 2);
+    assert.deepEqual(texts(), ['错峰发送', '立即运行'], '再次点击后旧提示清掉，成功则不留任何文字');
+  });
+});
+
+test('失败句挂在 role="status" 的 live region 上，读屏能播报', async () => {
+  const findStatus = (node) => {
+    if (node === null || node === undefined || node === false) return null;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const found = findStatus(child);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (node.props && node.props.role === 'status') return node;
+    return findStatus(node.children);
+  };
+
+  const fetchImpl = async (url) => {
+    if (url.startsWith('/dsh-offpeak/release')) return { ok: false, json: async () => ({}) };
+    return { ok: true, json: async () => ({ ...BASE_STATUS, waiting: true }) };
+  };
+
+  await withHarness({ fetch: fetchImpl }, async ({ rt }) => {
+    assert.equal(findStatus(rt.tree), null, '没失败时不该有 live region 占位');
+    const button = findButton(rt.tree, '立即运行');
+    button.props.onClick();
+    await rt.flush();
+
+    const region = findStatus(rt.tree);
+    assert.ok(region, '失败提示必须是 role="status"');
+    assert.deepEqual(collectTexts(region), ['没能立即运行：宿主没有响应'], '文案不变');
+    // 样式不动：还是那句 0.62 透明度的次要文字。
+    assert.equal(region.props.style.opacity, 0.62);
+  });
+});
+
 test('apply：挂到 conversation.composer.dock / dsh-offpeak-notice / order 12', () => {
   let registered = null;
   let injectedName = null;

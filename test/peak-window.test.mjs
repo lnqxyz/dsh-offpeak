@@ -5,6 +5,7 @@ import {
   DEFAULT_PEAK_WINDOWS,
   DEFAULT_TIME_ZONE,
   activeWindow,
+  candidateWindows,
   isPeak,
   isoWeekday,
   localParts,
@@ -177,6 +178,94 @@ test('抖动后落进下一段高峰也继续推', () => {
   const release = nextReleaseAt(sh(WED.year, WED.month, WED.day, 10, 0), chained);
   assert.equal(isPeak(release, chained), false);
   assert.equal(localParts(release, 'Asia/Shanghai').hour, 14);
+});
+
+// ---------------------------------------------------------------------------
+// 抖动不许提前放行（0.1.20，P0-3）
+// ---------------------------------------------------------------------------
+
+test('负抖动被钳到 0：放行时刻不早于高峰终点', () => {
+  // 抖动写成可正可负（[-60, 60]）时，负数会把放行时刻拉到高峰还没结束的那一刻：
+  // 11:59 发出去，照样按原价付钱。抖动只该往后延，不该提前。
+  const at = sh(WED.year, WED.month, WED.day, 10, 0);
+  const edge = sh(WED.year, WED.month, WED.day, 12, 0).getTime();
+  const cases = [
+    { jitter: [-60, 60], random: () => 0, expect: edge, label: '[-60,60] 抽到下限' },
+    { jitter: [-60, 60], random: () => 0.5, expect: edge + 30_000, label: '[-60,60] 抽到中点' },
+    { jitter: [-60, -30], random: () => 0, expect: edge, label: '整段为负' },
+    { jitter: [120, 60], random: () => 0, expect: edge, label: '上下限写反' },
+    { jitter: [Number.NaN, 30], random: () => 0, expect: edge, label: '下限不是数字' },
+  ];
+  for (const item of cases) {
+    const released = nextReleaseAt(at, { jitter: item.jitter, random: item.random });
+    assert.equal(released.getTime(), item.expect, `${item.label}：放行时刻算错`);
+    assert.equal(isPeak(released, FIXED_JITTER), false, `${item.label}：放行时刻仍在高峰内`);
+  }
+});
+
+test('钳到 0 之后，首尾相接的窗口仍能推到真正的低谷（guard 循环收敛）', () => {
+  // 抖动钳到 0 只是保证「不提前」，落点仍可能正好是下一段窗口的开头。
+  // guard 循环必须继续往后推，且不能因为终点没变而空转。
+  const chained = {
+    peakWindows: [
+      { days: [3], start: '09:00', end: '12:00' },
+      { days: [3], start: '11:00', end: '14:00' },
+    ],
+    jitter: [-60, 60],
+    random: () => 0,
+  };
+  const released = nextReleaseAt(sh(WED.year, WED.month, WED.day, 10, 0), chained);
+  assert.equal(isPeak(released, chained), false, '放行时刻必须真的落在低谷');
+  assert.equal(localParts(released, 'Asia/Shanghai').hour, 14);
+});
+
+test('全天窗口这种绕成环的配置也不会让 nextReleaseAt 卡住', () => {
+  // 每天 24 小时都是高峰时，本来就不存在「低谷」这个落点。这里只要求它
+  // 有限步内返回（不能因为 guard 循环空转而挂死），返回值是不是高峰无所谓。
+  const allDay = {
+    peakWindows: [{ days: [1, 2, 3, 4, 5, 6, 7], start: '00:00', end: '00:00' }],
+    jitter: [0, 0],
+  };
+  const start = Date.now();
+  const released = nextReleaseAt(sh(WED.year, WED.month, WED.day, 10, 0), allDay);
+  assert.ok(released instanceof Date);
+  assert.ok(Date.now() - start < 1000, '不能卡住');
+});
+
+// ---------------------------------------------------------------------------
+// 坏窗口项不许把整机拖垮（0.1.20，P0-1）
+// ---------------------------------------------------------------------------
+
+test('窗口数组里的坏项被跳过，不抛 TypeError', () => {
+  // `peakWindows: [null]` 之前会在 `window.days` 上抛 TypeError —— 而这条路径在
+  // `llm/stream` 的同步链路上，一次配置手滑能让所有模型调用都发不出去。
+  const broken = {
+    peakWindows: [null, undefined, 42, 'oops', [], { days: [3], start: '09:00', end: '12:00' }],
+  };
+  assert.doesNotThrow(() => isPeak(sh(WED.year, WED.month, WED.day, 10, 0), broken));
+  assert.equal(isPeak(sh(WED.year, WED.month, WED.day, 10, 0), broken), true, '合法那项仍要生效');
+  assert.equal(isPeak(sh(WED.year, WED.month, WED.day, 13, 0), broken), false);
+  assert.doesNotThrow(() => candidateWindows(sh(WED.year, WED.month, WED.day, 10, 0), broken));
+});
+
+test('只有坏项时当作没有高峰：立即放行，不抛错', () => {
+  const onlyBroken = { peakWindows: [null] };
+  const at = sh(WED.year, WED.month, WED.day, 10, 0);
+  assert.doesNotThrow(() => nextReleaseAt(at, onlyBroken));
+  assert.equal(nextReleaseAt(at, onlyBroken).getTime(), at.getTime(), '没有可用窗口 = 低谷 = 不延迟');
+  assert.equal(isPeak(at, onlyBroken), false);
+});
+
+test('peakWindows 不是数组时退回内置默认窗口，而不是让 for...of 崩', () => {
+  // normalizeConfig 会把它归一成 null，但本模块是公开导出的，可能被别处直接调。
+  for (const bad of ['nope', 42, {}]) {
+    assert.doesNotThrow(
+      () => isPeak(sh(WED.year, WED.month, WED.day, 10, 0), { peakWindows: bad }),
+      String(bad),
+    );
+  }
+  assert.equal(isPeak(sh(WED.year, WED.month, WED.day, 10, 0), { peakWindows: 'nope' }), true);
+  assert.equal(isPeak(sh(WED.year, WED.month, WED.day, 10, 0), { peakWindows: {} }), true);
 });
 
 test('默认窗口常量没被意外改写', () => {

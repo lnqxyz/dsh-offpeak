@@ -202,3 +202,80 @@ test('主会话自己（非委派）照常续跑', () => {
   assert.equal(result, 'woken');
   assert.deepEqual(agent.log, ['wakeDriver']);
 });
+
+// ---------------------------------------------------------------------------
+// 判据不能只认 hasPending（P1-3）
+//
+// `agent.inbox` 不在 `Agent` 的公开类型面上，`hasPending` 同样不在。宿主换个
+// 实现、这个 getter 改名或直接消失，判据就恒为 undefined —— 旧代码在这里静默
+// 返回 `skipped:empty`，用户看到的是重启前排好的消息原地不动，也没有任何一条
+// 日志说得出原因。所以两路并认：`hasPending === true`，或者数组里确实有内容。
+// ---------------------------------------------------------------------------
+
+/** 造一个 inbox 形状可控的假 agent（只保留恢复流程会碰的那几个字段）。 */
+function makeSparseAgent(inboxFields, { withWake = true } = {}) {
+  const log = [];
+  const agent = { inbox: inboxFields, log };
+  if (withWake) agent.wakeDriver = () => log.push('wakeDriver');
+  return agent;
+}
+
+test('hasPending 缺失但 nextTurn 里有消息：仍要恢复，不能静默当队列是空的', () => {
+  // 宿主换实现后最危险的形态：字段没了，消息还在。
+  const pending = [msg('a'), msg('b')];
+  const agent = makeSparseAgent({
+    nextTurn: pending,
+    nextStep: [],
+    remove: (id) => {
+      const index = pending.findIndex((m) => m.id === id);
+      return index >= 0 ? pending.splice(index, 1)[0] : undefined;
+    },
+  });
+  const result = recoverPendingOnResume({ agent, source: 'resume' }, cfg, quiet);
+  assert.equal(result, 'woken');
+  assert.deepEqual(agent.log, ['wakeDriver']);
+});
+
+test('hasPending 变成 undefined 但 nextStep 里有消息：同样要恢复', () => {
+  const agent = makeSparseAgent({
+    nextTurn: [],
+    nextStep: [msg('s')],
+    hasPending: undefined,
+    remove: () => undefined,
+  });
+  const result = recoverPendingOnResume({ agent, source: 'resume' }, cfg, quiet);
+  assert.equal(result, 'woken', 'nextStep 有内容时不能因为 hasPending 没了就放弃');
+  assert.deepEqual(agent.log, ['wakeDriver']);
+});
+
+test('hasPending 是一个恒返回 undefined 的 getter 时也不挡恢复', () => {
+  const agent = makeSparseAgent({
+    nextTurn: [msg('a')],
+    nextStep: [],
+    get hasPending() {
+      return undefined;
+    },
+    remove: () => undefined,
+  });
+  assert.equal(recoverPendingOnResume({ agent, source: 'resume' }, cfg, quiet), 'woken');
+});
+
+test('hasPending 说 true 但数组读不出来：仍按有排队处理（宁可多叫醒一次）', () => {
+  const agent = makeSparseAgent({
+    get nextTurn() {
+      throw new Error('nextTurn 读不出来');
+    },
+    get nextStep() {
+      throw new Error('nextStep 读不出来');
+    },
+    hasPending: true,
+  });
+  assert.equal(recoverPendingOnResume({ agent, source: 'resume' }, cfg, quiet), 'woken');
+  assert.deepEqual(agent.log, ['wakeDriver']);
+});
+
+test('两路都为空时仍然认定队列是空的（放宽判据不等于总是恢复）', () => {
+  const agent = makeSparseAgent({ nextTurn: [], nextStep: [], hasPending: undefined });
+  assert.equal(recoverPendingOnResume({ agent, source: 'resume' }, cfg, quiet), 'skipped:empty');
+  assert.deepEqual(agent.log, [], '没排队就不能去叫醒驱动器');
+});

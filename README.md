@@ -1,5 +1,9 @@
 # dsh-offpeak · 错峰发送
 
+仓库：<https://github.com/lnqxyz/dsh-offpeak> · 问题与建议：<https://github.com/lnqxyz/dsh-offpeak/issues>
+
+宿主版本要求：`@deepseek-ai/dsh-llm` **`^0.2.2-rc.1`**（与 `package.json` 的 `peerDependencies` 一致；`engines.dsh` 同时要求宿主 `>=0.2.2-rc.1`）。低于这个版本装不上，也不保证 `llm/stream` 的派发参数仍与下文一致。
+
 高峰时段不立刻发出模型调用，等到最近的低谷再发。**只等 DeepSeek 系列**：走 `deepseek` / `workbuddy` 通道的 `deepseek` 模型（0.1.17 起，双条件判定，见下节）。
 
 **高峰** = 周一至周五 09:00–12:00、14:00–18:00（左闭右开，即 09:00 进高峰、12:00 进低谷）。
@@ -103,11 +107,11 @@
 
 | 元素 | 说明 |
 | --- | --- |
-| iOS 风格开关 + 「错峰发送」 | 轨道 51×31 胶囊形（iOS 标准尺寸），圆点 27×27 白色带轻微阴影；**开 = 苹果蓝 `#007AFF`，关 = 黑色 `#000000`**，切换有 0.2s 过渡。黑轨道带一圈 1px `rgba(120,120,128,0.4)` 描边，深色主题下也不会和背景糊在一起。开 = 本会话照常按峰谷排队；关 = 本会话一律不排队。默认开。滑块与「错峰发送」四个字是同一个按钮，点哪个都行 |
+| iOS 风格开关 + 「错峰发送」 | 轨道 51×31 胶囊形（iOS 标准尺寸），圆点 27×27 白色带轻微阴影；**开 = 苹果蓝 `#007AFF`，关 = 黑色 `#000000`**，切换有 0.2s 过渡。黑轨道带一圈 1px `rgba(120,120,128,0.4)` 描边；0.1.20 起**关态与两种禁用态**再套一圈 1px 外光边（外描边不占布局），深色主题下轨道轮廓才看得出来——只有内圈时深色面板上关态对比度只有 1.19:1，现在 3.42:1。开态可点时反而不加这圈，免得蓝轨道多一道边。开 = 本会话照常按峰谷排队；关 = 本会话一律不排队。默认开。滑块与「错峰发送」四个字是同一个按钮，点哪个都行 |
 | 「立即运行」 | 只在开关开着、本会话确实有调用在排队、且不在旁路期时出现。点失败（宿主没响应）会就地显示「没能立即运行：宿主没有响应」，不会静默什么都不发生 |
 
 - **不渲染任何状态解释文字**（用户 2026-11-13 拍板）。0.1.17 之前这一行右侧会随轮询写「低谷（半价），立即发送」「高峰（原价），提交会排队到 12:00……」「已排队，将在 12:00 之后自动开始」「已关：本会话不排队」「跟随主会话：已关，本会话不排队」「演练中：只记日志，不排队」「总开关在配置里关闭」等句子；0.1.18 把这些字**全部删掉**。原因是用户明确不要这些字样，而且它们随轮询不断变化、又长又占宽度。想知道现在是不是高峰、什么时候放行，看 `/peak` 或 `GET /dsh-offpeak/status`，信息一样且更完整。
-- **错误句是唯一的文字**：只在「立即运行」失败时出现，是那个按钮唯一的反馈，不是状态提示，所以保留；没有错误时整段不渲染（不留空 `span`，否则 flex 的 `gap` 会在开关与按钮之间留空档）。
+- **错误句是唯一的文字**：只在「立即运行」失败时出现，是那个按钮唯一的反馈，不是状态提示，所以保留；没有错误时整段不渲染（不留空 `span`，否则 flex 的 `gap` 会在开关与按钮之间留空档）。0.1.20 起这句话带 `role="status"`，读屏会念出来；而且**只有再点一次「立即运行」才会被清掉**——以前每 5 秒的轮询成功就把这句擦掉，失败提示最短只闪几十毫秒。
 - **按会话独立，且沿父子链继承**：开关状态留在宿主内存里，按 `sessionId` 隔离；子代理会话读取它自己和所有上级会话的开关——主会话关掉，正在跑的子代理也一起不排队；主会话打开，子代理照常排队。链上任何一环关掉都算关。
 - **子代理会话里的开关置灰**：继承到「关」时，滑块点不动（`aria-checked="false"` + 整按钮 45% 不透明，没有文字说明）——它自己改不了主会话的决定。
 - **关掉即放行**：切换为关的一瞬间会叫醒本会话（以及继承它的子代理）正在等的调用，不会出现「界面显示已关、调用还挂着」。
@@ -137,27 +141,38 @@
 | `dryRun` | `false` | 只写日志不拦截。第一次装建议先开，看一轮日志确认规则 |
 | `timeZone` | `Asia/Shanghai` | 判定峰谷用的时区 |
 | `peakWindows` | 见下 | 高峰窗口数组；给 `[]` = 没有高峰 = 完全关闭拦截 |
-| `releaseJitterSeconds` | `[60, 120]` | 高峰结束后再随机等这么多秒，避免整点一起涌出去 |
+| `releaseJitterSeconds` | `[60, 120]` | 高峰结束后再随机等这么多秒，避免整点一起涌出去。**只往后延，不提前**（0.1.20）：下限写成负数会被当成 0，上下限写反或不是数字则整段抖动按 0 处理 |
 | `manualReleaseCommand` | `true` | 注册 `/peak` 与 `/peak now` |
 | `resumePending` | `true` | 重启后自动推一把上次没跑完的排队消息（0.1.3） |
 | `resumeInterruptedTurn` | `true` | 重启后自动接着跑上次被打断的那一轮（0.1.4） |
 
 `peakWindows` 每一项是 `{ days: [1..7], start: 'HH:MM', end: 'HH:MM' }`，`days` 用 ISO 星期（周一 1、周日 7）。`end <= start` 表示跨午夜。
 
+**配错的窗口不会让插件崩，也不会静默失效**（0.1.20 起）：逐项校验 `days` 与两个时刻，不合格的那一项被丢弃并在日志里告警一次（同一处坏值只告警一次，不刷屏），其余合法窗口照常生效。写错成 `start: '9点'`、`end: '25:00'`、`days: '1-5'`（字符串而非数组）这类，以前是整项被跳过、看起来像插件完全不拦；现在至少有一行日志告诉你哪一项被丢了、丢了几项。`peakWindows` 里混进 `null` / 数字这类非对象项，也一样被跳过——以前一个 `null` 能让**所有**模型调用都发不出去。
+
 ## 命令
 
-- `/peak` —— 第一行回报正在运行的插件版本，然后是现在是不是高峰、本会话开关状态、本次调用什么时候放行、下一个高峰在什么时候。
+- `/peak` —— 现在是不是高峰、本会话开关状态、本次调用什么时候放行、下一个高峰在什么时候。
   > 0.1.17 起那句预测带一句范围限定：「本次调用将在 X 之后放行（仅 DeepSeek 系列：走 deepseek / workbuddy 通道的 deepseek 模型；其它模型高峰时立即发出）」。命令在调用发生前跑，拿不到即将用的 `provider` / `model`，所以它只能给范围说明，不能预测这一次到底会不会等。
+  > 0.1.20 起第一行不再报版本号（用户 2026-11-13 拍板：界面不显示版本号，这条口径一并管到命令输出）。要查版本看下节。
 - `/peak now` —— 立即放行本会话排队的调用；并且只要本会话还在连续调用就不再拦，停下来 60 秒后恢复。手动插队用这个，和界面上的「立即运行」是同一个动作。
 
 ## 怎么确认「现在跑的是哪一版」
 
-`GET /dsh-offpeak/status` 返回体里带 `version` 字段（0.1.7 起），`/peak` 的第一行也报同一个值。
-两者读的都是 `lib/index.js` 里写死的 `VERSION` 常量 —— 也就是**正在内存里运行的那份代码**的版本，
+`GET /dsh-offpeak/status` 返回体里带 `version` 字段（0.1.7 起）。0.1.20 起 `/peak` 的第一行不再报版本号，所以**这条路现在只剩 status 一条**。
+它读的是 `lib/index.js` 里写死的 `VERSION` 常量 —— 也就是**正在内存里运行的那份代码**的版本，
 不是磁盘上 `package.json` 的版本。这两个值在「换包了但宿主还没重新加载」时会不一致，正是最需要区分的时候。
 
 ```bash
-curl -s -H 'x-dsh-offpeak: 1' "$DSH_WEB_URL/dsh-offpeak/status?sessionId=<会话id>" |   python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'
+# 1) 先取宿主地址：打开 DSH 界面，地址栏里形如 http://127.0.0.1:<端口> 的那一段就是。
+#    在界面里按 F12 → Console 执行 location.origin，也会直接打印出同一个值。
+#    端口每次启动可能不同，所以下面这行要填成你当下看到的地址。
+# 2) 填好之后整段粘贴执行。这一步只查版本，sessionId 给任意字符串都行；
+#    想看某个具体会话的开关状态，再把它换成那个会话的 id。
+DSH_WEB_URL='http://127.0.0.1:<端口>'          # ← 换成第 1 步拿到的地址
+curl -s -H 'x-dsh-offpeak: 1' \
+  "$DSH_WEB_URL/dsh-offpeak/status?sessionId=check-version" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'
 ```
 
 ## 装法
@@ -165,9 +180,13 @@ curl -s -H 'x-dsh-offpeak: 1' "$DSH_WEB_URL/dsh-offpeak/status?sessionId=<会话
 先打成本地 bundle，再交给 DSH 的插件管理器安装：
 
 ```bash
-cd <项目目录>                          # 本仓库根目录（README.md 所在处）
-npm pack --pack-destination dist      # 需带 npm_config_cache=/tmp/npm-cache-offpeak
+cd <项目目录>                                   # 本仓库根目录（README.md 所在处）
+mkdir -p dist                                   # npm 不会自己建目标目录，缺了会 ENOENT
+npm pack --cache "$(pwd)/临时/npm-cache" --pack-destination dist
+rm -rf 临时/npm-cache                           # 打完就删，别把 npm 缓存留在仓库里
 ```
+
+`--cache` 不是可选项：它把 npm 的缓存与日志目录钉在仓库内，绕开「本机默认缓存目录不可写」这类环境问题（症状是 `npm error Log files were not written due to an error writing to the directory: ~/.npm/_logs`，命令本身还没开始干活就退了）。四行按顺序整段粘贴即可；`npm pack` 那行会打印产物文件名，`dist/` 里就是可安装的 bundle。
 
 再用 `plugin_manager` 的 `install_bundle`，target 填打出来的 `file:.../dist/dsh-offpeak-<版本>.tgz`。
 **不要**手写 `pnpm add`：`pnpm` 不一定在 PATH，且 plugin_manager 会顺带把 bundle 行补进 `dsh.profile.bundles`。
@@ -231,55 +250,63 @@ npm pack --pack-destination dist      # 需带 npm_config_cache=/tmp/npm-cache-o
 
 宿主把 `/plugins` 路由放在 web 鉴权之后，`curl` 拿 404，所以**从宿主里**抓客户端 bundle 这条路走不通（试过 registry 与 web-login 的凭据，不绕过鉴权）。改用等价的本地真渲染，harness 已随仓库放在 `tools/visual-check/`：
 
-- `tools/visual-check/harness.html` —— 装真 React 18（vendored 的 production UMD，共 152 KB，不联网）、桩掉 `window.__ModuleLoader__` 收 spec、桩 `fetch` 按 `sessionId` 回不同状态、桩 `ctx.slots.register` 抓组件，把十种状态一次画出来（低谷 / 高峰 / 已排队 / 跨天放行 / 本会话关 / 跟随主会话关 / 总开关关 / **演练中** / 320px 窄窗 / 520px），外加深色主题两格（开蓝 + 关黑）。0.1.18 起这一行只剩开关与「立即运行」；0.1.19 起开关是 iOS 观感，harness 仍逐格渲染，用来确认位置、320px 不溢出、深色主题下黑轨道靠 1px 描边仍有轮廓。
+- `tools/visual-check/harness.html` —— 装真 React 18（vendored 的 production UMD，共 152 KB，不联网）、桩掉 `window.__ModuleLoader__` 收 spec、桩 `fetch` 按 `sessionId` 回不同状态、桩 `ctx.slots.register` 抓组件，把十一种状态一次画出来（低谷 / 高峰 / 已排队 / 跨天放行 / 本会话关 / 跟随主会话关 / 总开关关 / **演练中** / **失败态** / 320px 窄窗 / 520px），外加深色主题三格（开蓝 + 关黑 + 禁用）。顶部有个「模拟宿主无响应」开关（也可用 `?fail=1` 打开），勾上后所有 release 请求都 reject，用来看那一句失败提示长什么样。0.1.18 起这一行只剩开关与「立即运行」；0.1.19 起开关是 iOS 观感；0.1.20 起开关外多一圈 1px 光边，深色主题下关态与禁用态才看得出轮廓。
 - 它 `<script src="../../lib/client.js">` 直接加载**项目里真正要发出去的那份**客户端代码，不做拷贝，所以自检不会对着旧快照跑。
 - `tools/visual-check/` 不在 `package.json` 的 `files` 里，不随 npm 包发布。
 
 复现（无头 Chrome，截完用 `read_image` 看；若模型不支持图像输入，改用 `#measure` 的 DOM 断言 + 像素采样）：
 
 ```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --disable-gpu \
-  --hide-scrollbars --window-size=900,1500 --virtual-time-budget=3000 \
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --no-sandbox \
+  --disable-gpu --hide-scrollbars --window-size=900,1500 --virtual-time-budget=3000 \
   --screenshot=/tmp/offpeak-shot.png \
   "file://$PWD/tools/visual-check/harness.html"
 ```
+
+`--headless=new --no-sandbox` 是 2026-11-13 在本机实测需要的：老式 `--headless` 与不带 `--no-sandbox` 都会在 GPU 进程初始化处退出（`GPU process exited unexpectedly: exit_code=6` / `sandbox initialization failed: Operation not permitted`），一个字节都截不出来。
 
 0.1.18 真渲染复核：状态文字删掉后，这一行只剩开关与按钮（以及失败时那一句错误）。用 1440×900 与 320px 两档截图确认：开关在左、按钮紧随其后，320px 不溢出、不折成两行；深色主题下轨道与文字靠 `currentColor` 正常。失败句保留 `flex: 0 1 auto` + `overflow-wrap: anywhere`，窄窗时自己折行，不会把按钮挤出容器。
 
 0.1.19 复核（2026-11-13 15:17）：十态 + 深色两格的截图与 `#measure` 都过——轨道一律 51×31、圆点 27×27，开蓝 `(0,122,255)` / 关黑 `(0,0,0)`，深色面板 `(35,35,41)` 上关态描边像素 `(48,48,51)`、黑轨道内部 `(0,0,0)`，轮廓可辨；320px 格 row `298×31` 单行、开关 `x=35..140`、按钮 `x=146..212`。截图按上面的命令现截现看，不随仓库发布。
 
+0.1.20 复核（2026-11-13 21:23）：十一态 + 深色三格（开 / 关 / 禁用）。深色卡片 `(35,35,41)` 上，关态与禁用态的黑轨道靠外圈那 1px 光边撑住轮廓——外圈像素横向 `(117,117,124)`、纵向 `(122,122,126)`，与面板的对比度 **3.42:1 / 3.66:1**（0.1.19 只有内圈时是 1.19:1 / 1.08:1）；开态仍 `(0,122,255)`，白圆点 `(255,255,255)`，禁用态整枚 45%，白圆点 `(134,134,137)`。截图与 `#measure` 的 14 条记录逐格核对，所有格 `rowInside` 全为 true（没有溢出容器）。失败态那格量到 `role='status'` 与文案「没能立即运行：宿主没有响应」。
+
 它替代不了的部分：本机真实 dock 行里与同排 activity / usage 的相互挤压，那要有真会话在跑的页面才看得见。
 
 ## 测试
 
-```bash
-node --test test/peak-window.test.mjs test/gate.test.mjs test/model-gate.test.mjs test/integration.test.mjs test/routes.test.mjs test/recover.test.mjs test/resume-turn.test.mjs test/version.test.mjs test/client.test.mjs
-```
-
-**上面九个文件里只有 `test/integration.test.mjs` 需要宿主的真实实现。** 它 `import` 的是项目根下的 `node_modules/cordis.js`，而 `node_modules/` 不随仓库发布，所以刚 clone 下来直接跑那条命令，会在这一个文件上报找不到模块；其余八个文件零依赖，clone 下来就能跑。
-
-要跑 integration，先把那份实现原样取出来：从安装的宿主应用包（asar）里 `dsh/node_modules/@deepseek-ai/cordis/lib/index.js` 这个路径取出该文件，**一个字节都不改**地存成项目根下的 `node_modules/cordis.js`。它是宿主自带的那份实现，不是 npm 上的公开包，所以没得 `npm install`。
-
-取不到也没关系，跳过它，只跑其余八个：
+刚 clone 下来就能跑：
 
 ```bash
-node --test test/peak-window.test.mjs test/gate.test.mjs test/model-gate.test.mjs test/routes.test.mjs test/recover.test.mjs test/resume-turn.test.mjs test/version.test.mjs test/client.test.mjs
+npm test
 ```
 
-这样总数是 **182**（203 减去 integration 那 21 个），不是漏跑了测试。
+它跑八个零依赖测试文件，**不需要 `node_modules/`**，也不用先装任何东西。跑了多少条、过了多少条看它自己的输出（末尾的 `# tests` / `# pass`）——这个 README 不写死数字，加了用例之后那些数字就会腐坏。
 
-203 个测试，九个文件：
+九个文件里的第九个 `test/integration.test.mjs` **不在 `npm test` 里**：它 `import` 的是项目根下的 `node_modules/cordis.js`，而 `node_modules/` 不随仓库发布，刚 clone 下来跑它只会得到 `MODULE_NOT_FOUND`。所以 `npm test` 只列那八个，集成测试单独给了 `test:integration`。
 
-- `test/peak-window.test.mjs`（17）—— 纯函数：窗口解析、跨午夜、ISO 星期、放行时刻（含「抖动后仍在高峰就继续推」）、抖动区间、坏时区不抛错。
-- `test/gate.test.mjs`（40）—— 闸门：假时钟下的等待与取消、分片等待不超 `setTimeout` 上限、`/peak now` 放行与旁路续期、会话链继承（父关子关、关掉时放行子代理的等待、登记后再复查开关、成环保护）、`status()` 的形状与 `judge` 判据、配置归一与幂等、dryRun 真放行且不登记等待、后台调用（非 loop 请求）不排队。
-- `test/model-gate.test.mjs`（32）—— 双条件判定（0.1.17）：`shouldHoldForCall` 的 provider×model 真值表（两关都中才扣；模型对但通道不对如 `qwenwork` + `deepseek-chat` 放行；通道对但模型不对如 `workbuddy` + `qwen3.8-max-preview` 放行；两个都不中也放行）、provider 的 `deepseek` / `workbuddy` 是「或」、只做包含匹配（`my-workbuddy-proxy`、`my-deepseek-chat`、裸名 `deepseek` 都算）、大小写不敏感；缺失 / 空 / 非字符串（含 `Symbol`、`String` 包装对象）/ 读字段抛错一律 fail-open 且不抛错；闸门层面覆盖「高峰 + 双条件命中仍扣到 12:00」「高峰 + 任一条件不中立即放行且不写『排到几点』的假日志」「低谷 + 任意组合放行且一条日志都不写」「dryRun 两态」「本会话关 / 子代理继承关 / 后台调用即便双条件命中仍先放行 / enabled:false 下判定不介入」「`status().heldModel` 与 `heldProvider` 的有无人等两态」，以及「已放行的流一个 chunk 都不少」这条不打断在途的红线。
-- `test/integration.test.mjs`（21）—— 用 asar 里真实的 cordis 起一个假宿主，走真实 `ctx.waterfall("llm/stream", ...)` 与 `ctx.serial("agent/created", ...)` 派发，验证「高峰扣住 / 低谷透传 / abort 前不调下游 / 带 purpose 的后台调用照常发出去 / **模型对但通道不对（`qwenwork` + `deepseek-chat`）高峰立即放行（走真实派发参数，确认 provider 与 model 的取法）** / 非 deepseek 模型立即放行 / 字段缺失时 fail-open / 双条件命中仍扣得住 / 服务缺席时闸门照样生效 / 卸载后监听器移除 / 续跑监听器不 bail 掉别人」。
-- `test/routes.test.mjs`（33）—— 三条 HTTP 路由：假 req/res 直调 handler，覆盖三层校验（自定义头 / 本机 Host / 同源）、400、405、500 兜底与响应形状，以及会话开关的隔离、继承、透传、唤醒与恢复；另有 `heldModel` / `heldProvider` 随 status 送达、通道不对的 deepseek 模型不误报 `waiting`、响应字段不缺项三条。不起服务、不绑端口。
-- `test/recover.test.mjs`（15）—— 排队续跑：只认 `resume`、顺序不变、无 `wakeDriver` 时的退路只挪最后一条且不先删后放弃、委派会话跳过、拿不到会话对象时按「不是委派」处理、所有异常都被吞成一条 warn。
-- `test/resume-turn.test.mjs`（29）—— 在途续跑：七种 `turn/end.reason` 的判定表、尾部识别（空 / 无 turn / 运行中 / 空闲）、幂等、消息形状、委派跳过、异常不外泄。
-- `test/version.test.mjs`（3）—— `VERSION` 与 `package.json.version` 一致，`status()` 与 HTTP 路由都报同一个版本。
-- `test/client.test.mjs`（13）—— 客户端半插件：不装 jsdom，自带迷你 React 运行时（`useState` / `useEffect` / `createElement`），桩掉 `window.__ModuleLoader__` 与 `fetch` 后真的渲染组件并收集可见文字，验证注册契约（槽位名 / id / order / `inject` 拿到的 `sessionId`）、**八种状态下可见文字只有「错峰发送」（排队时多一个「立即运行」）且没有任何状态解释**、开关的可见文字与 `aria-label` 仍是「错峰发送」、iOS 开关的 51×31 胶囊 / 开蓝关黑 / 27px 白圆点 / 0.2s 过渡、禁用态 45% 不透明且黑轨道描边不消失、「立即运行」只在 `waiting && !bypassing && 会话开` 时出现、点它失败时显示「没能立即运行：宿主没有响应」、轮询失败保留上次状态且不追加提示、`readStatus` 的六种分支（含 URL 与请求头）、`ctx.effect` 被拒时退回直接登记，以及模块只导出 `inject` / `readStatus` / `apply`（`hintText` 已随状态文案一起删除）。
+要跑集成测试，先把那份实现原样取出来：从安装的宿主应用包（asar）里 `dsh/node_modules/@deepseek-ai/cordis/lib/index.js` 这个路径取出该文件，**一个字节都不改**地存成项目根下的 `node_modules/cordis.js`。它是宿主自带的那份实现，不是 npm 上的公开包，所以没得 `npm install`。
+
+放好之后：
+
+```bash
+npm run test:integration
+```
+
+**全量 = `npm test` + `npm run test:integration`**（八个文件 + 一个文件）。两条都过才算全绿；只跑 `npm test` 也不是漏测，是那条命令按设计就不碰需要宿主实现的文件。
+
+九个文件分别测什么：
+
+- `test/peak-window.test.mjs` —— 纯函数：窗口解析、跨午夜、ISO 星期、放行时刻（含「抖动后仍在高峰就继续推」）、抖动区间、坏时区不抛错。
+- `test/gate.test.mjs` —— 闸门：假时钟下的等待与取消、分片等待不超 `setTimeout` 上限、`/peak now` 放行与旁路续期、会话链继承（父关子关、关掉时放行子代理的等待、登记后再复查开关、成环保护）、`status()` 的形状与 `judge` 判据、配置归一与幂等、dryRun 真放行且不登记等待、后台调用（非 loop 请求）不排队。
+- `test/model-gate.test.mjs` —— 双条件判定（0.1.17）：`shouldHoldForCall` 的 provider×model 真值表（两关都中才扣；模型对但通道不对如 `qwenwork` + `deepseek-chat` 放行；通道对但模型不对如 `workbuddy` + `qwen3.8-max-preview` 放行；两个都不中也放行）、provider 的 `deepseek` / `workbuddy` 是「或」、只做包含匹配（`my-workbuddy-proxy`、`my-deepseek-chat`、裸名 `deepseek` 都算）、大小写不敏感；缺失 / 空 / 非字符串（含 `Symbol`、`String` 包装对象）/ 读字段抛错一律 fail-open 且不抛错；闸门层面覆盖「高峰 + 双条件命中仍扣到 12:00」「高峰 + 任一条件不中立即放行且不写『排到几点』的假日志」「低谷 + 任意组合放行且一条日志都不写」「dryRun 两态」「本会话关 / 子代理继承关 / 后台调用即便双条件命中仍先放行 / enabled:false 下判定不介入」「`status().heldModel` 与 `heldProvider` 的有无人等两态」，以及「已放行的流一个 chunk 都不少」这条不打断在途的红线。
+- `test/integration.test.mjs` —— 用 asar 里真实的 cordis 起一个假宿主，走真实 `ctx.waterfall("llm/stream", ...)` 与 `ctx.serial("agent/created", ...)` 派发，验证「高峰扣住 / 低谷透传 / abort 前不调下游 / 带 purpose 的后台调用照常发出去 / **模型对但通道不对（`qwenwork` + `deepseek-chat`）高峰立即放行（走真实派发参数，确认 provider 与 model 的取法）** / 非 deepseek 模型立即放行 / 字段缺失时 fail-open / 双条件命中仍扣得住 / 服务缺席时闸门照样生效 / 卸载后监听器移除 / 续跑监听器不 bail 掉别人」。
+- `test/routes.test.mjs` —— 三条 HTTP 路由：假 req/res 直调 handler，覆盖三层校验（自定义头 / 本机 Host / 同源）、400、405、500 兜底与响应形状，以及会话开关的隔离、继承、透传、唤醒与恢复；另有 `heldModel` / `heldProvider` 随 status 送达、通道不对的 deepseek 模型不误报 `waiting`、响应字段不缺项三条。不起服务、不绑端口。
+- `test/recover.test.mjs` —— 排队续跑：只认 `resume`、顺序不变、无 `wakeDriver` 时的退路只挪最后一条且不先删后放弃、委派会话跳过、拿不到会话对象时按「不是委派」处理、所有异常都被吞成一条 warn。
+- `test/resume-turn.test.mjs` —— 在途续跑：七种 `turn/end.reason` 的判定表、尾部识别（空 / 无 turn / 运行中 / 空闲）、幂等、消息形状、委派跳过、异常不外泄。
+- `test/version.test.mjs` —— `VERSION` 与 `package.json.version` 一致，`status()` 与 HTTP 路由都报同一个版本。
+- `test/client.test.mjs` —— 客户端半插件：不装 jsdom，自带迷你 React 运行时（`useState` / `useEffect` / `createElement`），桩掉 `window.__ModuleLoader__` 与 `fetch` 后真的渲染组件并收集可见文字，验证注册契约（槽位名 / id / order / `inject` 拿到的 `sessionId`）、**七种状态下可见文字只有「错峰发送」（排队时多一个「立即运行」）且没有任何状态解释**、开关的可见文字与 `aria-label` 仍是「错峰发送」、iOS 开关的 51×31 胶囊 / 开蓝关黑 / 27px 白圆点 / 0.2s 过渡、开关外那圈 1px 光边只加在「关态」和两种禁用态上（开态可点时反而不加，免得蓝轨道多一道边）、禁用态 45% 不透明且黑轨道描边不消失、**点开关这条主交互**（POST 方法与 `enabled` 参数、失败回落到原状态、`canToggle` 为假时点不动）、「立即运行」只在 `waiting && !bypassing && 会话开` 时出现、点它失败时显示「没能立即运行：宿主没有响应」且这句带 `role="status"`（读屏能播报）、轮询成功不会把失败句擦掉、轮询失败保留上次状态且不追加提示、`readStatus` 的六种分支（含 URL 与请求头）、`ctx.effect` 被拒时退回直接登记，以及模块只导出 `inject` / `readStatus` / `apply`（`hintText` 已随状态文案一起删除）、两处 `title` 悬停提示已删除。
 
 > 0.1.17 之前写的那批「高峰扣住」用例，`options` 里**必须同时带一个命中的 provider 与 model**（各文件顶部的 `HELD_PROVIDER` / `HELD_MODEL` 常量，如 `workbuddy` + `deepseek-chat`）。改成双条件后，只补 model 不补 provider 的请求会按 fail-open 放行，那些用例就会以「闸门坏了」以外的原因变绿——测的是别的东西。
 
-`node --test test/`（目录形式）会报 `MODULE_NOT_FOUND`，必须显式列 `.mjs` 文件（`package.json` 的 `scripts.test` 已列全）。
+`node --test test/`（目录形式）会把它扫进来并报 `MODULE_NOT_FOUND`，所以要按文件显式列 `.mjs`——`npm test` 与 `npm run test:integration` 就是这么分工的。

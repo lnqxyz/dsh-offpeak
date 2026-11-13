@@ -226,6 +226,20 @@ test('/peak 报告当前状态，不抛异常', async () => {
   assert.match(result.text, /高峰|低谷/);
 });
 
+// 0.1.20：用户 2026-11-13 拍板「界面不显示版本号」，这条口径一并管到 /peak 输出。
+// 版本只剩 `GET /dsh-offpeak/status` 与 `status()` 两条路能查，所以这里钉死：
+// 命令的正文里不许再出现 `VERSION` 那个值。
+test('/peak 不再报版本号（用户 2026-11-13 拍板）', async () => {
+  const { registered } = await makeHost({ config: {} });
+  const command = registered.find((definition) => definition.name === 'peak');
+  const result = command.handler({ rawInput: '', agent: { id: 's-root' } });
+  assert.equal(result.kind, 'success');
+  assert.doesNotMatch(result.text, new RegExp(plugin.VERSION.replace(/\./g, '\\.')), '首行版本号已删除，正文里不该再出现');
+  // 第一行现在是峰谷状态。这里不断言具体是高峰还是低谷 —— makeHost 用的是真实时钟，
+  // 断言具体值会让这条用例在一天的某些时段变红。
+  assert.match(result.text.split('\n')[0], /^(现在是高峰（原价）。|现在是低谷（半价）。)$/, '第一行应为峰谷状态，不再是版本号');
+});
+
 test('/peak now 拿不到会话 id 时返回错误而不是抛异常', async () => {
   const { registered } = await makeHost({ config: {} });
   const command = registered.find((definition) => definition.name === 'peak');

@@ -43,6 +43,17 @@
   .row320 { width: 320px; }
   .row520 { width: 520px; }
   .row760 { width: 760px; }
+  /* 失败态开关：静置页里也能把 fetch 切成 reject，验「立即运行」失败那一格 */
+  .failbar {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    margin: 0 0 20px; padding: 8px 12px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    font-size: 12px;
+  }
+  .failbar label { cursor: pointer; }
+  .failbar input { margin: 0 6px 0 0; vertical-align: -1px; }
+  .failbar .note { margin: 0; }
+  .failbar code { font-size: 11px; }
   .dark {
     background: #1b1b1f;
     --bg: #141417;
@@ -54,6 +65,10 @@
 </style>
 </head>
 <body>
+<div class="failbar">
+  <label><input type="checkbox" id="failMode"> 模拟宿主无响应（「立即运行」失败）</label>
+  <span class="note">勾上后所有 release 请求都 reject：各格再点「立即运行」都会落到 <code>role="status"</code> 的失败句上。「失败态」那一格会自动点一次、无需手点。也可以直接用 <code>?fail=1</code> 打开。</span>
+</div>
 <div id="root"></div>
 <script src="./vendor/react.production.min.js"></script>
 <script src="./vendor/react-dom.production.min.js"></script>
@@ -120,6 +135,12 @@
       peak: false, waiting: false, bypassing: false,
       releaseAt: null, releaseLabel: null, judge: 'agent-loop', version: '0.1.19',
     },
+    // 失败态：一直「已排队」，而 release 请求被桩成 reject（见下面的 fetch）。
+    'release-fail': {
+      enabled: true, sessionEnabled: true, inheritedOff: false, dryRun: false,
+      peak: true, waiting: true, bypassing: false,
+      releaseAt: 1794462060000, releaseLabel: '12:01', judge: 'agent-loop', version: '0.1.19',
+    },
     'dry-run': {
       enabled: true, sessionEnabled: true, inheritedOff: false, dryRun: true,
       peak: true, waiting: false, bypassing: false,
@@ -127,14 +148,43 @@
     },
   };
 
+  // 失败态开关：勾上后所有 release 请求都 reject，模拟「宿主没有响应」。
+  // 也可以直接用 ?fail=1 打开本页。状态读取（status）不受影响 —— 界面照常渲染。
+  const failBox = document.getElementById('failMode');
+  const failFromUrl = new URLSearchParams(location.search).get('fail') === '1';
+  failBox.checked = failFromUrl;
+
   window.fetch = async (url) => {
-    const id = new URL(url, 'http://x/').searchParams.get('sessionId') || '';
+    const u = new URL(url, 'http://x/');
+    const id = u.searchParams.get('sessionId') || '';
+
+    // release-fail 这一格永远失败；其余格看控制条勾没勾。
+    const releasing = u.pathname.indexOf('/release') !== -1;
+    if (releasing && (failBox.checked || id === 'release-fail')) {
+      throw new Error('simulated host timeout');
+    }
+
     const state = STATES[id] || STATES['off-peak'];
     return {
       ok: true,
       json: async () => state,
     };
   };
+
+  // 「立即运行」的失败句只在点过之后才出现，静态页得自己点一下。
+  // 这个包装器在首轮轮询落地后替我们点，点完把结果留在页面上给截图看。
+  function AutoFailRun({ sessionId }) {
+    const box = React.useRef(null);
+    React.useEffect(() => {
+      const timer = setTimeout(() => {
+        const btn = box.current
+          && [...box.current.querySelectorAll('button')].find((b) => b.textContent.trim() === '立即运行');
+        if (btn) btn.click();
+      }, 600);
+      return () => clearTimeout(timer);
+    }, []);
+    return h('div', { ref: box }, h(Component, { sessionId }));
+  }
 
   const CASES = [
     ['低谷（默认开，蓝）', 'off-peak', 'row760'],
@@ -145,30 +195,33 @@
     ['跟随主会话已关（置灰不可点）', 'inherited', 'row760'],
     ['总开关关（只展示状态）', 'global-off', 'row760'],
     ['演练中（只记日志，开关不可点）', 'dry-run', 'row760'],
+    ['失败态（点「立即运行」宿主没响应）', 'release-fail', 'row760', AutoFailRun],
     ['窄窗口 320px：开关与按钮', 'waiting', 'row320'],
     ['中等 520px', 'waiting', 'row520'],
   ];
 
   function render() {
-    const nodes = CASES.map(([title, id, cls]) =>
+    const nodes = CASES.map(([title, id, cls, Wrapper]) =>
       h('div', { className: 'case', key: id + cls },
         h('div', { className: 'case-title' }, title + '  ·  ' + id),
         h('div', { className: 'dock ' + cls },
-          h(Component, { sessionId: id }),
+          Wrapper ? h(Wrapper, { sessionId: id }) : h(Component, { sessionId: id }),
           h('div', { className: 'composer-hint' }, '（此处是输入框，开关在它上方的 dock 行）'),
         ),
       ),
     );
-    // 深色一组：开态蓝、关态黑各一格。关态黑在深色背景上还能看见轮廓，
-    // 全靠轨道那圈 1px rgba(120,120,128,0.4) 描边 —— 这一格就是给这个坑留的证据。
+    // 深色一组：开态蓝 / 关态黑 / 禁用态灰各一格。
+    // 「关」与「禁用」在深色面板上曾只剩一颗悬空白点（内圈描边 1.19:1 / 1.08:1），
+    // 现在靠轨道外面那圈 1px 光边撑轮廓 —— 这两格就是给这个坑留的证据。
     const dark = h('div', { className: 'case dark', key: 'dark' },
-      h('div', { className: 'case-title' }, '深色主题：开态蓝 / 关态黑（1px 描边保住黑轨道轮廓）'),
+      h('div', { className: 'case-title' }, '深色主题：开态蓝 / 关态黑 / 禁用态（外描边保住黑轨道轮廓）'),
       h('div', { className: 'dock row760' }, h(Component, { sessionId: 'waiting' })),
       h('div', { className: 'dock row760', style: { marginTop: '10px' } }, h(Component, { sessionId: 'off' })),
+      h('div', { className: 'dock row760', style: { marginTop: '10px' } }, h(Component, { sessionId: 'inherited' })),
     );
     ReactDOM.createRoot(document.getElementById('root')).render(
       h('div', null,
-        h('h1', null, 'dsh-offpeak 开关：十种状态 + 深色主题的真渲染（0.1.19 iOS 观感）'),
+        h('h1', null, 'dsh-offpeak 开关：十一种状态 + 深色主题（开/关/禁用）的真渲染（0.1.19 iOS 观感；0.1.20 深色禁用态加外描边）'),
         h('p', { className: 'note' }, 'React 18 真渲染（vendored production UMD）+ 假 fetch，尺寸/换行/层级按宿主 composer dock 气质模拟。'),
         h('div', { className: 'grid' }, nodes, dark),
       ),
@@ -208,9 +261,14 @@
             const knob = track?.firstElementChild || null;
             const tcs = track ? getComputedStyle(track) : null;
             const kcs = knob ? getComputedStyle(knob) : null;
+            const errNode = root ? root.querySelector('[role="status"]') : null;
             report.push({
               title: docks.length > 1 ? title + ' #' + (i + 1) : title,
               text: root ? root.textContent.trim() : null,
+              errorRole: errNode ? errNode.getAttribute('role') : null,
+              errorText: errNode ? errNode.textContent.trim() : null,
+              errorOpacity: errNode ? getComputedStyle(errNode).opacity : null,
+              errorInside: errNode ? inside(errNode) : null,
               switchLabel: sw ? (sw.getAttribute('aria-label') || '') : null,
               ariaChecked: sw ? sw.getAttribute('aria-checked') : null,
               disabled: sw ? sw.disabled : null,

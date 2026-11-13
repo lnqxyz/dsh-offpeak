@@ -1,9 +1,17 @@
 {
   "name": "dsh-offpeak",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "type": "module",
   "description": "错峰发送：高峰时段（周一至周五 09:00-12:00、14:00-18:00）不立即发出模型调用，等到最近的低谷再发。",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lnqxyz/dsh-offpeak.git"
+  },
+  "homepage": "https://github.com/lnqxyz/dsh-offpeak#readme",
+  "bugs": {
+    "url": "https://github.com/lnqxyz/dsh-offpeak/issues"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
@@ -49,6 +57,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/peak-window.test.mjs test/gate.test.mjs test/model-gate.test.mjs test/integration.test.mjs test/routes.test.mjs test/recover.test.mjs test/resume-turn.test.mjs test/version.test.mjs test/client.test.mjs"
+    "test": "node --test test/peak-window.test.mjs test/gate.test.mjs test/model-gate.test.mjs test/routes.test.mjs test/recover.test.mjs test/resume-turn.test.mjs test/version.test.mjs test/client.test.mjs",
+    "test:integration": "node --test test/integration.test.mjs"
   }
 }
